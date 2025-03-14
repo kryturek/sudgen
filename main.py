@@ -80,26 +80,33 @@ def countSolutions(board):
     return count
 
 def removeNumbersUnique(board, removals):
-    """Randomly removes numbers from the board while ensuring a unique solution."""
+    """Removes numbers from the board while ensuring a unique solution.
+       This version shuffles cell coordinates once rather than picking
+       random indices repeatedly.
+    """
+    # get all cell positions in a list and shuffle once
+    positions = [(i, j) for i in range(9) for j in range(9)]
+    random.shuffle(positions)
     removed = 0
-    while removed < removals:
-        i = random.randint(0, 8)
-        j = random.randint(0, 8)
-        # Only attempt removal if the cell is not already empty.
+
+    # iterate through each candidate cell
+    for i, j in positions:
+        if removed >= removals:
+            break
         if board[i][j] != 0:
-            # Save the number and remove it
             backup = board[i][j]
             board[i][j] = 0
 
-            # Make a deep copy to count solutions without altering the puzzle
+            # Check uniqueness using a deep copy
             boardCopy = copy.deepcopy(board)
             solCount = countSolutions(boardCopy)
 
             if solCount != 1:
-                # Revert removal if uniqueness is lost
+                # Restore if puzzle is no longer unique
                 board[i][j] = backup
             else:
                 removed += 1
+
     return board
 
 @app.get("/sudoku")
@@ -108,11 +115,20 @@ def get_sudoku(removals: int = 50):
     Generate a Sudoku puzzle with a unique solution.
     
     Query parameter: removals (default 50) is the number of cells to remove.
+    Returns the puzzle (with removals), the complete solution, and the number of removed cells.
     """
     board = generateBoard()
     if fillBoard(board):
+        # Save a deep copy of the solved board as the solution
+        solution = copy.deepcopy(board)
+        
+        # Remove numbers to generate the puzzle
         puzzle = removeNumbersUnique(board, removals)
-        return {"puzzle": puzzle}
+        
+        # Count how many cells have been removed (i.e. are 0)
+        removed_count = sum(cell == 0 for row in puzzle for cell in row)
+        
+        return {"puzzle": puzzle, "solution": solution, "removed_count": removed_count}
     else:
         return JSONResponse(content={"error": "Could not generate a valid board"}, status_code=500)
 
