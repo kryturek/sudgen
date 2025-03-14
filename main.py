@@ -1,10 +1,14 @@
 import random
 import copy
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
 
 def generateBoard():
     board = []
     for i in range(9):
-        board.append([0]*9)
+        board.append([0] * 9)
     return board
 
 def printBoard(board):
@@ -12,23 +16,6 @@ def printBoard(board):
         for j in range(9):
             print(board[i][j], end=' ')
         print()
-
-def fillBoard(board):
-    empty = findEmpty(board)
-    if not empty:
-        return True  # Board filled successfully
-    row, col = empty
-
-    numbers = list(range(1, 10))
-    random.shuffle(numbers)
-    for num in numbers:
-        if validateNumber(board, row, col, num):
-            board[row][col] = num
-            if fillBoard(board):
-                return True
-            board[row][col] = 0  # Reset on backtrack
-
-    return False
 
 def findEmpty(board):
     for i in range(9):
@@ -56,6 +43,23 @@ def validateNumber(board, row, col, num):
                 return False
 
     return True
+
+def fillBoard(board):
+    empty = findEmpty(board)
+    if not empty:
+        return True  # Board filled successfully
+    row, col = empty
+
+    numbers = list(range(1, 10))
+    random.shuffle(numbers)
+    for num in numbers:
+        if validateNumber(board, row, col, num):
+            board[row][col] = num
+            if fillBoard(board):
+                return True
+            board[row][col] = 0  # Reset on backtrack
+
+    return False
 
 def countSolutions(board):
     """Recursively count the number of solutions for the board."""
@@ -98,15 +102,20 @@ def removeNumbersUnique(board, removals):
                 removed += 1
     return board
 
-def main():
+@app.get("/sudoku")
+def get_sudoku(removals: int = 50):
+    """
+    Generate a Sudoku puzzle with a unique solution.
+    
+    Query parameter: removals (default 50) is the number of cells to remove.
+    """
     board = generateBoard()
-    if fillBoard(board):  # Board filled successfully
-        # Remove a specified number of elements to create the puzzle.
-        # For example, attempt to remove 40 numbers.
-        puzzle = removeNumbersUnique(board, 50)
-        printBoard(puzzle)
+    if fillBoard(board):
+        puzzle = removeNumbersUnique(board, removals)
+        return {"puzzle": puzzle}
     else:
-        print("No solution found.")
+        return JSONResponse(content={"error": "Could not generate a valid board"}, status_code=500)
 
 if __name__ == '__main__':
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
