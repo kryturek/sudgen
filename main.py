@@ -20,35 +20,24 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 # Get absolute path to .env file
 ENV_PATH = Path(__file__).resolve().parent / '.env'
-print(f"Looking for .env at: {ENV_PATH}")
-print(f"File exists: {ENV_PATH.exists()}")
 
-# Force reload environment
+# Try to load from .env file if it exists, otherwise use environment variables
 if ENV_PATH.exists():
-    # Clear any existing env vars
-    if 'DATABASE_URL' in os.environ:
-        del os.environ['DATABASE_URL']
-    if 'JWT_SECRET' in os.environ:
-        del os.environ['JWT_SECRET']
-    
-    # Load fresh from file
     load_dotenv(dotenv_path=ENV_PATH, override=True)
-    
-    # Debug prints
-    db_url = os.getenv('DATABASE_URL')
-    jwt_secret = os.getenv('JWT_SECRET')
-    print(f"Loaded DATABASE_URL: {'*' * len(db_url) if db_url else 'None'}")
-    print(f"Loaded JWT_SECRET: {'*' * len(jwt_secret) if jwt_secret else 'None'}")
+    print(f"Loaded environment from .env file at: {ENV_PATH}")
 else:
-    raise FileNotFoundError(f"Cannot find .env file at {ENV_PATH}")
+    print("No .env file found, using environment variables")
+
+# Get required environment variables
+db_url = os.getenv('DATABASE_URL')
+jwt_secret = os.getenv('JWT_SECRET')
 
 if not db_url or not jwt_secret:
-    print("Environment variables not loaded!")
-    print(f"Current directory: {os.getcwd()}")
-    print(f"Looking for .env at: {ENV_PATH}")
-    print(f"DATABASE_URL exists: {db_url is not None}")
-    print(f"JWT_SECRET exists: {jwt_secret is not None}")
-    raise ValueError("Required environment variables are missing")
+    raise ValueError(
+        "Required environment variables DATABASE_URL and JWT_SECRET must be set "
+        "either in .env file or as environment variables"
+    )
+
 print(f"Database URL found with length: {len(db_url)}")
 
 # Set up logging
