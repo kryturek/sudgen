@@ -1,9 +1,30 @@
 import random
 import copy
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Depends, Response, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+import jwt
+import bcrypt
+from typing import Optional, List
+import json
+import os
+from dotenv import load_dotenv
+import asyncpg
+
+load_dotenv()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def generateBoard():
     return [[0] * 9 for _ in range(9)]
@@ -105,7 +126,7 @@ def removeNumbersUnique(board, removals):
     return board
 
 @app.get("/sudoku")
-def get_sudoku(removals: int = 50):
+def get_sudoku(removals: int = 3):
     """
     Generate a Sudoku puzzle with a unique solution.
     Query param 'removals' (default 50) is the number of cells to remove.
@@ -119,6 +140,248 @@ def get_sudoku(removals: int = 50):
         return {"puzzle": puzzle, "solution": solution, "removed_count": removed_count}
     else:
         return JSONResponse(content={"error": "Could not generate a valid board"}, status_code=500)
+
+# Database connection pool
+async def create_pool():
+    return await asyncpg.create_pool(
+        os.getenv('DATABASE_URL'),
+        min_size=1,
+        max_size=10
+    )
+
+# Create tables if they don't exist
+async def init_db(pool):
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                points INTEGER DEFAULT 0,
+                games_played INTEGER DEFAULT 0,
+                games_won INTEGER DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS saved_games (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                puzzle JSONB NOT NULL,
+                solution JSONB NOT NULL,
+                pencil_marks JSONB,
+                difficulty INTEGER,
+                started_at TIMESTAMP WITH TIME ZONE,
+                last_played TIMESTAMP WITH TIME ZONE,
+                completed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+app = FastAPI()
+pool = None
+
+@app.on_event("startup")
+async def startup():
+    global pool
+    pool = await create_pool()
+    await init_db(pool)
+
+@app.on_event("shutdown")
+async def shutdown():
+    if pool:
+        await pool.close()
+
+# Auth models
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class User(BaseModel):
+    id: int
+    username: str
+    email: str
+    points: int
+    games_played: int
+    games_won: int
+
+class SavedGame(BaseModel):
+    puzzle: List[List[int]]
+    solution: List[List[int]]
+    pencil_marks: dict
+    difficulty: int
+    started_at: datetime
+    last_played: datetime
+    completed: bool
+
+# JWT settings
+SECRET_KEY = "your-secret-key-here"  # Change this in production!
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 week
+
+# Auth utilities
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_current_user(request: Request) -> Optional[User]:
+    token = request.cookies.get("session")
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        conn = sqlite3.connect('sudoku.db')
+        c = conn.cursor()
+        c.execute('SELECT * FROM users WHERE id = ?', (payload["sub"],))
+        user = c.fetchone()
+        conn.close()
+        if user:
+            return User(
+                id=user[0],
+                username=user[1],
+                email=user[2],
+                points=user[4],
+                games_played=user[5],
+                games_won=user[6]
+            )
+    except:
+        return None
+    return None
+
+# Auth endpoints
+@app.post("/auth/register")
+async def register(user: UserCreate):
+    async with pool.acquire() as conn:
+        # Check if user exists
+        existing = await conn.fetchrow(
+            'SELECT id FROM users WHERE email = $1 OR username = $2',
+            user.email, user.username
+        )
+        if existing:
+            raise HTTPException(status_code=400, detail="User already exists")
+        
+        # Hash password and create user
+        password_hash = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt()).decode()
+        await conn.execute('''
+            INSERT INTO users (username, email, password_hash)
+            VALUES ($1, $2, $3)
+        ''', user.username, user.email, password_hash)
+        
+        return {"message": "User created successfully"}
+
+@app.post("/auth/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), response: Response = None):
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            'SELECT * FROM users WHERE email = $1',
+            form_data.username
+        )
+        
+        if not user or not bcrypt.checkpw(
+            form_data.password.encode(), 
+            user['password_hash'].encode()
+        ):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        # Get saved games
+        saved_games = await conn.fetch(
+            'SELECT * FROM saved_games WHERE user_id = $1',
+            user['id']
+        )
+        
+        # Create session token
+        token = create_access_token({"sub": str(user['id'])})
+        response.set_cookie(
+            key="session",
+            value=token,
+            httponly=True,
+            max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            samesite="lax"
+        )
+        
+        return {
+            "user": {
+                "id": user['id'],
+                "username": user['username'],
+                "email": user['email'],
+                "points": user['points'],
+                "games_played": user['games_played'],
+                "games_won": user['games_won']
+            },
+            "saved_games": [dict(game) for game in saved_games]
+        }
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("session")
+    return {"message": "Logged out successfully"}
+
+@app.get("/auth/session")
+async def get_session(current_user: User = Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"user": current_user}
+
+# Game endpoints
+@app.post("/games/save")
+async def save_game(game: SavedGame, current_user: User = Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    async with pool.acquire() as conn:
+        game_id = await conn.fetchval('''
+            INSERT INTO saved_games 
+            (user_id, puzzle, solution, pencil_marks, difficulty, started_at, last_played, completed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id
+        ''', 
+            current_user.id,
+            json.dumps(game.puzzle),
+            json.dumps(game.solution),
+            json.dumps(game.pencil_marks),
+            game.difficulty,
+            game.started_at,
+            game.last_played,
+            game.completed
+        )
+        
+        if game.completed:
+            points = 10 * game.difficulty
+            await conn.execute('''
+                UPDATE users 
+                SET points = points + $1, games_played = games_played + 1, games_won = games_won + 1
+                WHERE id = $2
+            ''', points, current_user.id)
+        
+        return {"id": game_id, "message": "Game saved successfully"}
+
+@app.get("/games/{game_id}")
+async def get_game(game_id: int, current_user: User = Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    async with pool.acquire() as conn:
+        game = await conn.fetchrow('SELECT * FROM saved_games WHERE id = $1 AND user_id = $2', 
+                                   game_id, current_user.id)
+    
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    
+    return {
+        "id": game['id'],
+        "puzzle": game['puzzle'],
+        "solution": game['solution'],
+        "pencil_marks": game['pencil_marks'],
+        "difficulty": game['difficulty'],
+        "started_at": game['started_at'],
+        "last_played": game['last_played'],
+        "completed": game['completed']
+    }
 
 if __name__ == '__main__':
     import uvicorn
