@@ -5,8 +5,8 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime, timedelta
-import jwt
+from datetime import datetime, timedelta, timezone
+import jwt as pyjwt  # Rename import to avoid confusion
 import bcrypt
 from typing import Optional, List
 import json
@@ -16,37 +16,27 @@ from pathlib import Path
 import asyncpg
 from contextlib import asynccontextmanager
 
-# Get absolute path to .env file
-ENV_PATH = Path(__file__).resolve().parent / '.env'
-print(f"Looking for .env at: {ENV_PATH}")
-print(f"File exists: {ENV_PATH.exists()}")
+# Force clear environment variables first
+if 'DATABASE_URL' in os.environ:
+    del os.environ['DATABASE_URL']
+if 'JWT_SECRET' in os.environ:
+    del os.environ['JWT_SECRET']
 
-# Force reload environment
-if ENV_PATH.exists():
-    # Clear any existing env vars
-    if 'DATABASE_URL' in os.environ:
-        del os.environ['DATABASE_URL']
-    if 'JWT_SECRET' in os.environ:
-        del os.environ['JWT_SECRET']
-    
-    # Load fresh from file
-    load_dotenv(dotenv_path=ENV_PATH, override=True)
-    
-    # Debug prints
-    db_url = os.getenv('DATABASE_URL')
-    jwt_secret = os.getenv('JWT_SECRET')
-    print(f"Loaded DATABASE_URL: {'*' * len(db_url) if db_url else 'None'}")
-    print(f"Loaded JWT_SECRET: {'*' * len(jwt_secret) if jwt_secret else 'None'}")
-else:
-    raise FileNotFoundError(f"Cannot find .env file at {ENV_PATH}")
+# Get absolute path and load environment
+ENV_PATH = Path(__file__).resolve().parent / '.env'
+if not ENV_PATH.exists():
+    raise FileNotFoundError(f"Environment file not found at {ENV_PATH}")
+
+# Load with override
+load_dotenv(dotenv_path=ENV_PATH, override=True)
+
+# Validate after loading
+db_url = os.getenv('DATABASE_URL')
+jwt_secret = os.getenv('JWT_SECRET')
 
 if not db_url or not jwt_secret:
-    print("Environment variables not loaded!")
-    print(f"Current directory: {os.getcwd()}")
-    print(f"Looking for .env at: {ENV_PATH}")
-    print(f"DATABASE_URL exists: {db_url is not None}")
-    print(f"JWT_SECRET exists: {jwt_secret is not None}")
     raise ValueError("Required environment variables are missing")
+
 print(f"Database URL found with length: {len(db_url)}")
 
 def generateBoard():
@@ -176,12 +166,11 @@ async def init_db(pool):
             CREATE TABLE IF NOT EXISTS saved_games (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER REFERENCES users(id),
-                puzzle JSONB NOT NULL,
-                solution JSONB NOT NULL,
+                initial_puzzle JSONB NOT NULL,     -- Starting puzzle state
+                current_puzzle JSONB NOT NULL,     -- Current progress
+                solution JSONB NOT NULL,           -- Complete solution
                 pencil_marks JSONB,
                 difficulty INTEGER,
-                started_at TIMESTAMP WITH TIME ZONE,
-                last_played TIMESTAMP WITH TIME ZONE,
                 completed BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )
@@ -194,7 +183,6 @@ pool = None
 async def lifespan(app: FastAPI):
     global pool
     try:
-        print("Attempting to connect to database with URL:", db_url)
         pool = await asyncpg.create_pool(
             dsn=db_url,
             min_size=1,
@@ -231,13 +219,21 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
 
-# Add CORS middleware
+# Update CORS middleware with more specific settings
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Allow-Origin",
+        "Origin",
+        "Accept"
+    ],
+    expose_headers=["*"],
 )
 
 # Auth models
@@ -255,13 +251,14 @@ class User(BaseModel):
     games_won: int
 
 class SavedGame(BaseModel):
-    puzzle: List[List[int]]
-    solution: List[List[int]]
-    pencil_marks: dict
-    difficulty: int
-    started_at: datetime
-    last_played: datetime
+    game_id: Optional[int]      # Only needed for updates
+    current_puzzle: List[List[int]]   
+    pencilMarks: dict
     completed: bool
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 # JWT settings
 SECRET_KEY = os.getenv('JWT_SECRET')  # Get from environment instead of hardcoding
@@ -271,30 +268,52 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 week
 # Auth utilities
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 async def get_current_user(request: Request) -> Optional[User]:
-    token = request.cookies.get("session")
-    if not token:
-        return None
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        token = request.cookies.get("session")
+        if not token:
+            return None
+
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if not payload or "sub" not in payload:
+            return None
+
         async with pool.acquire() as conn:
             user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', int(payload["sub"]))
-            if user:
-                return User(
-                    id=user['id'],
-                    username=user['username'],
-                    email=user['email'],
-                    points=user['points'],
-                    games_played=user['games_played'],
-                    games_won=user['games_won']
-                )
-    except:
+            if not user:
+                return None
+                
+            return User(
+                id=user['id'],
+                username=user['username'],
+                email=user['email'],
+                points=user['points'],
+                games_played=user['games_played'],
+                games_won=user['games_won']
+            )
+    except pyjwt.JWTError:
         return None
-    return None
+    except Exception as e:
+        print(f"User auth error: {str(e)}")
+        return None
+
+# Add this helper function to serialize dates
+def serialize_game(game):
+    return {
+        "id": game["id"],
+        "puzzle": game["puzzle"],
+        "solution": game["solution"],
+        "pencil_marks": game["pencil_marks"],
+        "difficulty": game["difficulty"],
+        "started_at": game["started_at"].isoformat() if game["started_at"] else None,
+        "last_played": game["last_played"].isoformat() if game["last_played"] else None,
+        "completed": game["completed"]
+    }
 
 # Auth endpoints
 @app.post("/auth/register")
@@ -316,17 +335,19 @@ async def register(user: UserCreate):
         return {"message": "User created successfully"}
 
 @app.post("/auth/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), response: Response = None):
+async def login(form_data: LoginRequest, response: Response):  # Change from OAuth2PasswordRequestForm
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
             'SELECT * FROM users WHERE email = $1',
-            form_data.username
+            form_data.email  # Use email directly from form_data
         )
+        
         if not user or not bcrypt.checkpw(
             form_data.password.encode(),
             user['password_hash'].encode()
         ):
             raise HTTPException(status_code=401, detail="Invalid credentials")
+        
         # Get saved games
         saved_games = await conn.fetch(
             'SELECT * FROM saved_games WHERE user_id = $1',
@@ -360,63 +381,104 @@ async def logout(response: Response):
     response.delete_cookie("session")
     return {"message": "Logged out successfully"}
 
+# Update the get_session endpoint
 @app.get("/auth/session")
 async def get_session(current_user: User = Depends(get_current_user)):
     if not current_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"user": current_user}
-
-# Game endpoints
-@app.post("/games/save")
-async def save_game(game: SavedGame, current_user: User = Depends(get_current_user)):
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        return JSONResponse({
+            "isAuthenticated": False,
+            "user": None,
+            "savedGames": []
+        })
+    
     async with pool.acquire() as conn:
-        game_id = await conn.fetchval('''
-            INSERT INTO saved_games 
-            (user_id, puzzle, solution, pencil_marks, difficulty, started_at, last_played, completed)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id
-        ''', 
-            current_user.id,
-            json.dumps(game.puzzle),
-            json.dumps(game.solution),
-            json.dumps(game.pencil_marks),
-            game.difficulty,
-            game.started_at,
-            game.last_played,
-            game.completed
+        saved_games = await conn.fetch(
+            'SELECT id, puzzle, solution, pencil_marks, difficulty, started_at, last_played, completed FROM saved_games WHERE user_id = $1 ORDER BY last_played DESC',
+            current_user.id
         )
-        
-        if game.completed:
-            points = 10 * game.difficulty
-            await conn.execute('''
-                UPDATE users 
-                SET points = points + $1, games_played = games_played + 1, games_won = games_won + 1 
-                WHERE id = $2
-            ''', points, current_user.id)
-        
-        return {"id": game_id, "message": "Game saved successfully"}
+    
+    return JSONResponse({
+        "isAuthenticated": True,
+        "user": {
+            "id": current_user.id,
+            "username": current_user.username,
+            "email": current_user.email,
+            "points": current_user.points,
+            "games_played": current_user.games_played,
+            "games_won": current_user.games_won
+        },
+        "savedGames": [serialize_game(dict(game)) for game in saved_games]
+    })
 
+# Update the get_game endpoint
 @app.get("/games/{game_id}")
 async def get_game(game_id: int, current_user: User = Depends(get_current_user)):
     if not current_user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     async with pool.acquire() as conn:
-        game = await conn.fetchrow('SELECT * FROM saved_games WHERE id = $1 AND user_id = $2', 
-                                   game_id, current_user.id)
+        game = await conn.fetchrow(
+            'SELECT * FROM saved_games WHERE id = $1 AND user_id = $2', 
+            game_id, current_user.id
+        )
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    return {
-        "id": game['id'],
-        "puzzle": game['puzzle'],
-        "solution": game['solution'],
-        "pencil_marks": game['pencil_marks'],
-        "difficulty": game['difficulty'],
-        "started_at": game['started_at'],
-        "last_played": game['last_played'],
-        "completed": game['completed']
-    }
+    
+    return serialize_game(dict(game))
+
+# Game endpoints
+@app.post("/games/start")
+async def start_game(puzzle_data: dict, current_user: User = Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        async with pool.acquire() as conn:
+            game_id = await conn.fetchval('''
+                INSERT INTO saved_games 
+                (user_id, initial_puzzle, current_puzzle, solution, difficulty, completed)
+                VALUES ($1, $2, $3, $4, $5, false)
+                RETURNING id
+            ''', 
+                current_user.id,
+                json.dumps(puzzle_data["puzzle"]),
+                json.dumps(puzzle_data["puzzle"]),  # Initial current_puzzle is same as initial
+                json.dumps(puzzle_data["solution"]),
+                puzzle_data["difficulty"]
+            )
+            return {"id": game_id}
+    except Exception as e:
+        print(f"Start game error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/games/{game_id}/update")
+async def update_game(game_id: int, game: SavedGame, current_user: User = Depends(get_current_user)):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        async with pool.acquire() as conn:
+            # Verify game belongs to user
+            existing = await conn.fetchrow(
+                'SELECT id FROM saved_games WHERE id = $1 AND user_id = $2',
+                game_id, current_user.id
+            )
+            if not existing:
+                raise HTTPException(status_code=404, detail="Game not found")
+
+            await conn.execute('''
+                UPDATE saved_games 
+                SET current_puzzle = $1, pencil_marks = $2, completed = $3
+                WHERE id = $4 AND user_id = $5
+            ''', 
+                json.dumps(game.current_puzzle),
+                json.dumps(game.pencilMarks),
+                game.completed,
+                game_id,
+                current_user.id
+            )
+            
+            return {"message": "Game updated successfully"}
+    except Exception as e:
+        print(f"Update game error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/sudoku")
 def get_sudoku(removals: int = 3):
