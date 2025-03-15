@@ -229,26 +229,23 @@ def create_access_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(request: Request) -> Optional[User]:
+async def get_current_user(request: Request) -> Optional[User]:
     token = request.cookies.get("session")
     if not token:
         return None
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        conn = sqlite3.connect('sudoku.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE id = ?', (payload["sub"],))
-        user = c.fetchone()
-        conn.close()
-        if user:
-            return User(
-                id=user[0],
-                username=user[1],
-                email=user[2],
-                points=user[4],
-                games_played=user[5],
-                games_won=user[6]
-            )
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', int(payload["sub"]))
+            if user:
+                return User(
+                    id=user['id'],
+                    username=user['username'],
+                    email=user['email'],
+                    points=user['points'],
+                    games_played=user['games_played'],
+                    games_won=user['games_won']
+                )
     except:
         return None
     return None
