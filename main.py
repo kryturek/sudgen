@@ -15,29 +15,43 @@ from dotenv import load_dotenv
 from pathlib import Path
 import asyncpg
 from contextlib import asynccontextmanager
+import logging
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
-# Force clear environment variables first
-if 'DATABASE_URL' in os.environ:
-    del os.environ['DATABASE_URL']
-if 'JWT_SECRET' in os.environ:
-    del os.environ['JWT_SECRET']
-
-# Get absolute path and load environment
+# Get absolute path to .env file
 ENV_PATH = Path(__file__).resolve().parent / '.env'
-if not ENV_PATH.exists():
-    raise FileNotFoundError(f"Environment file not found at {ENV_PATH}")
 
-# Load with override
-load_dotenv(dotenv_path=ENV_PATH, override=True)
+# Try to load from .env file if it exists, otherwise use environment variables
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=ENV_PATH, override=True)
+    print(f"Loaded environment from .env file at: {ENV_PATH}")
+else:
+    print("No .env file found, using environment variables")
 
-# Validate after loading
+# Get required environment variables
 db_url = os.getenv('DATABASE_URL')
 jwt_secret = os.getenv('JWT_SECRET')
 
 if not db_url or not jwt_secret:
-    raise ValueError("Required environment variables are missing")
+    raise ValueError(
+        "Required environment variables DATABASE_URL and JWT_SECRET must be set "
+        "either in .env file or as environment variables"
+    )
 
 print(f"Database URL found with length: {len(db_url)}")
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Environment variables with defaults
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
+PORT = int(os.getenv('PORT', 8000))
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost').split(',')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 
 def generateBoard():
     return [[0] * 9 for _ in range(9)]
@@ -183,11 +197,12 @@ pool = None
 async def lifespan(app: FastAPI):
     global pool
     try:
+        logger.info("Establishing database connection...")
         pool = await asyncpg.create_pool(
             dsn=db_url,
             min_size=1,
-            max_size=10,
-            ssl='require',
+            max_size=20,  # Increased for production
+            ssl='require' if ENVIRONMENT == 'production' else None,
             timeout=30,
             command_timeout=30,
             server_settings={
@@ -195,26 +210,18 @@ async def lifespan(app: FastAPI):
                 'client_encoding': 'utf8'
             }
         )
-        print("Pool created successfully")
-        
-        # Test the connection
-        async with pool.acquire() as conn:
-            version = await conn.fetchval('SELECT version()')
-            print(f"Connected to PostgreSQL: {version}")
+        logger.info("Database pool created successfully")
         
         await init_db(pool)
-        print("Database initialized")
+        logger.info("Database initialized")
         yield
-    except asyncpg.exceptions.PostgresError as e:
-        print(f"PostgreSQL Error: {type(e).__name__} - {str(e)}")
-        raise
     except Exception as e:
-        print(f"Unexpected error: {type(e).__name__} - {str(e)}")
+        logger.error(f"Error during startup: {str(e)}")
         raise
     finally:
         if pool:
             await pool.close()
-            print("Pool closed")
+            logger.info("Database pool closed")
 
 # Create FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
@@ -222,19 +229,20 @@ app = FastAPI(lifespan=lifespan)
 # Update CORS middleware with more specific settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[FRONTEND_URL],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "Access-Control-Allow-Headers",
-        "Access-Control-Allow-Origin",
-        "Origin",
-        "Accept"
-    ],
-    expose_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Set-Cookie", "Access-Control-Allow-Headers", 
+                  "Access-Control-Allow-Origin", "Authorization"],
+    expose_headers=["Set-Cookie"]
 )
+
+# Add TrustedHost middleware for production
+if ENVIRONMENT == 'production':
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=ALLOWED_HOSTS
+    )
 
 # Auth models
 class UserCreate(BaseModel):
@@ -256,7 +264,7 @@ class SavedGame(BaseModel):
     pencilMarks: dict
     completed: bool
 
-class LoginRequest(BaseModel):
+class LoginData(BaseModel):
     email: str
     password: str
 
@@ -335,15 +343,15 @@ async def register(user: UserCreate):
         return {"message": "User created successfully"}
 
 @app.post("/auth/login")
-async def login(form_data: LoginRequest, response: Response):  # Change from OAuth2PasswordRequestForm
+async def login(login_data: LoginData, response: Response = None):
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
             'SELECT * FROM users WHERE email = $1',
-            form_data.email  # Use email directly from form_data
+            login_data.email
         )
         
         if not user or not bcrypt.checkpw(
-            form_data.password.encode(),
+            login_data.password.encode(),
             user['password_hash'].encode()
         ):
             raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -498,4 +506,10 @@ def get_sudoku(removals: int = 3):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=PORT,
+        reload=ENVIRONMENT == 'development',
+        workers=4 if ENVIRONMENT == 'production' else 1
+    )
