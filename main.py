@@ -232,8 +232,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_URL],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Set-Cookie", "Access-Control-Allow-Headers", 
+                  "Access-Control-Allow-Origin", "Authorization"],
+    expose_headers=["Set-Cookie"]
 )
 
 # Add TrustedHost middleware for production
