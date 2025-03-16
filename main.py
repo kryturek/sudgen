@@ -506,13 +506,14 @@ def get_sudoku(removals: int = 3):
 
 if __name__ == '__main__':
     import uvicorn
-    # Get port from environment with default to 10000 for Render.com
     port = int(os.environ.get('PORT', 10000))
+    print(f"Starting server on 0.0.0.0:{port}")
     
-    print(f"Starting server on port {port}")
     uvicorn.run(
-        app,  # Changed from "main:app" to app
+        app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="info",
+        server_header=False,
+        proxy_headers=True
     )
