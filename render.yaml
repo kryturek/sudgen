@@ -3,16 +3,10 @@ services:
     name: sudgen-backend
     env: python
     buildCommand: pip install -r requirements.txt
-    # Updated start command with explicit host and port binding
-    startCommand: |
-      gunicorn main:app \
-        --worker-class uvicorn.workers.UvicornWorker \
-        --bind 0.0.0.0:$PORT \
-        --workers 4 \
-        --access-logfile - \
-        --error-logfile - \
-        --log-level info
+    startCommand: python main.py
     envVars:
+      - key: PORT
+        value: 10000
       - key: DATABASE_URL
         sync: false
       - key: JWT_SECRET
@@ -23,4 +17,4 @@ services:
         value: ".onrender.com"
       - key: FRONTEND_URL
         value: "https://your-frontend-url.com"
-    healthCheckPath: /
+    healthCheckPath: /docs
