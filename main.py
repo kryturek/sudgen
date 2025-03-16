@@ -266,6 +266,10 @@ class SavedGame(BaseModel):
     last_played: datetime
     completed: bool
 
+class LoginData(BaseModel):
+    email: str
+    password: str
+
 # JWT settings
 SECRET_KEY = os.getenv('JWT_SECRET')  # Get from environment instead of hardcoding
 ALGORITHM = "HS256"
@@ -319,17 +323,18 @@ async def register(user: UserCreate):
         return {"message": "User created successfully"}
 
 @app.post("/auth/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), response: Response = None):
+async def login(login_data: LoginData, response: Response = None):
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
             'SELECT * FROM users WHERE email = $1',
-            form_data.username
+            login_data.email
         )
         if not user or not bcrypt.checkpw(
-            form_data.password.encode(),
+            login_data.password.encode(),
             user['password_hash'].encode()
         ):
             raise HTTPException(status_code=401, detail="Invalid credentials")
+        
         # Get saved games
         saved_games = await conn.fetch(
             'SELECT * FROM saved_games WHERE user_id = $1',
