@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 PORT = int(os.getenv('PORT', 8000))
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost').split(',')
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://kryturek.github.io')
 
 def generateBoard():
     return [[0] * 9 for _ in range(9)]

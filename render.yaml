@@ -16,5 +16,5 @@ services:
       - key: ALLOWED_HOSTS
         value: ".onrender.com"
       - key: FRONTEND_URL
-        value: "https://kryturek.github.io/sudgen-frontend/"
+        value: "https://kryturek.github.io"
     healthCheckPath: /docs
