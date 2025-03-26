@@ -7,10 +7,6 @@ services:
     envVars:
       - key: PORT
         value: 10000
-      - key: DATABASE_URL
-        sync: false
-      - key: JWT_SECRET
-        sync: false
       - key: ENVIRONMENT
         value: production
       - key: ALLOWED_HOSTS
