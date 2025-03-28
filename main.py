@@ -1,7 +1,7 @@
 import random
 import copy
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
@@ -142,6 +142,23 @@ app.add_middleware(
     allow_headers=["Content-Type", "Access-Control-Allow-Headers", 
                   "Access-Control-Allow-Origin"],
 )
+
+@app.get("/")
+def root():
+    html_content = """
+    <html>
+        <head>
+            <title>Sudoku API</title>
+        </head>
+        <body>
+            <h1>Welcome to the Sudoku API!</h1>
+            <p>Use <a href="/sudoku">/sudoku</a> to get a Sudoku puzzle with 30 removed cells.</p>
+            <p>To customize the number of removed cells, use <code>/sudoku?removals=x</code>, where <code>x</code> is the number of cells to remove.</p>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
+
 
 @app.get("/sudoku")
 def get_sudoku(removals: int = 30):
